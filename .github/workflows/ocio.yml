@@ -1,0 +1,53 @@
+name: Copiar catalogo OcioStock
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: ocio
+  cancel-in-progress: false
+env:
+  TAG: datos
+  ARCHIVO: catalogo_c26bf5215a8ddd19d381b8b7.csv
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+jobs:
+  copiar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mantener activo el repositorio
+        run: |
+          ULT=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - ULT )) -gt $(( 20 * 86400 )) ]; then
+            date -u +%F > ultima-ejecucion.txt
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git add ultima-ejecucion.txt
+            git commit -m "mantener activo"
+            git push
+          fi
+      - name: Descargar y validar
+        env:
+          FUENTE: ${{ secrets.OCIO_URL }}
+        run: |
+          set -euo pipefail
+          [ -n "$FUENTE" ] || { echo "Falta el secreto OCIO_URL"; exit 1; }
+          curl -fsSL --compressed --retry 3 --retry-delay 10 --connect-timeout 30 --max-time 1200 -o "$ARCHIVO" "$FUENTE"
+          TAM=$(stat -c %s "$ARCHIVO")
+          echo "Descargados $TAM bytes"
+          [ "$TAM" -gt 1000000 ] || { echo "Archivo demasiado pequeño"; exit 1; }
+          CAB=$(head -c 3000 "$ARCHIVO")
+          grep -qi "ean" <<< "$CAB" && grep -qi "nombre" <<< "$CAB" || { echo "No parece el catálogo"; exit 1; }
+          [ "$(tail -c 2 "$ARCHIVO" | od -An -tx1 | grep -c 0a)" -ge 1 ] || { echo "Archivo cortado (no termina en salto de línea)"; exit 1; }
+          PREVIO=$(gh release view "$TAG" --json assets --jq ".assets[] | select(.name==\"$ARCHIVO\") | .size" 2>/dev/null || true)
+          PREVIO=${PREVIO:-0}
+          if [ "$PREVIO" -gt 0 ] && [ "$TAM" -lt $(( PREVIO / 2 )) ]; then echo "El archivo nuevo es mucho más pequeño que el anterior; no se reemplaza"; exit 1; fi
+      - name: Publicar copia
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Catalogo" --notes "Copia automatica del catalogo de OcioStock"
+          gh release upload "$TAG" "$ARCHIVO" --clobber
